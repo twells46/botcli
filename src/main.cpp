@@ -9,7 +9,9 @@
 
 extern "C" {
 #include <kipr/accel/accel.h>
+#include <kipr/analog/analog.h>
 #include <kipr/button/button.h>
+#include <kipr/digital/digital.h>
 #include <kipr/gyro/gyro.h>
 #include <kipr/magneto/magneto.h>
 }
@@ -58,6 +60,40 @@ bool is_valid_request_id(const std::string &id)
     }
 
     return true;
+}
+
+CLI::Validator analog_port_validator()
+{
+    CLI::Range port_range(0, 5);
+
+    return CLI::Validator(
+        [port_range](std::string &input) {
+            std::string checked_input = input;
+            if (!port_range(checked_input).empty()) {
+                return std::string("analog port must be between 0 and 5");
+            }
+
+            return std::string();
+        },
+        "0-5",
+        "ANALOG_PORT");
+}
+
+CLI::Validator digital_port_validator()
+{
+    CLI::Range port_range(0, 9);
+
+    return CLI::Validator(
+        [port_range](std::string &input) {
+            std::string checked_input = input;
+            if (!port_range(checked_input).empty()) {
+                return std::string("digital port must be between 0 and 9");
+            }
+
+            return std::string();
+        },
+        "0-9",
+        "DIGITAL_PORT");
 }
 
 RawGlobalOptions inspect_raw_global_options(int argc, char **argv)
@@ -155,6 +191,68 @@ int emit_int_result(const OutputContext &output,
     return emit_json_result(output, command, result);
 }
 
+int emit_port_value_result(const OutputContext &output,
+                           const std::string &command,
+                           int port,
+                           int value)
+{
+    if (!output.json) {
+        std::cout << value << '\n';
+        return 0;
+    }
+
+    picojson::object result;
+    result["port"] = json_int(port);
+    result["value"] = json_int(value);
+    return emit_json_result(output, command, result);
+}
+
+int emit_analog_values_result(const OutputContext &output, const int values[6])
+{
+    if (!output.json) {
+        for (int port = 0; port < 6; ++port) {
+            if (port != 0) {
+                std::cout << " ";
+            }
+            std::cout << values[port];
+        }
+        std::cout << '\n';
+        return 0;
+    }
+
+    picojson::array json_values;
+    for (int port = 0; port < 6; ++port) {
+        json_values.push_back(json_int(values[port]));
+    }
+
+    picojson::object result;
+    result["values"] = picojson::value(json_values);
+    return emit_json_result(output, "analog", result);
+}
+
+int emit_digital_values_result(const OutputContext &output, const int values[10])
+{
+    if (!output.json) {
+        for (int port = 0; port < 10; ++port) {
+            if (port != 0) {
+                std::cout << " ";
+            }
+            std::cout << values[port];
+        }
+        std::cout << '\n';
+        return 0;
+    }
+
+    picojson::array json_values;
+    for (int port = 0; port < 10; ++port) {
+        json_values.push_back(json_int(values[port]));
+    }
+
+    picojson::object result;
+    result["values"] = picojson::value(json_values);
+    return emit_json_result(output, "digital", result);
+}
+
 bool is_axis(const std::string &axis)
 {
     return axis == "x" || axis == "y" || axis == "z";
@@ -231,6 +329,13 @@ int emit_xyz_result(const OutputContext &output,
 
 std::string parse_error_code(const CLI::ParseError &err)
 {
+    const std::string message = err.what();
+    if (dynamic_cast<const CLI::ValidationError *>(&err) != nullptr &&
+        (message.find("analog port") != std::string::npos ||
+         message.find("digital port") != std::string::npos)) {
+        return "invalid_port";
+    }
+
     if (dynamic_cast<const CLI::RequiredError *>(&err) != nullptr ||
         dynamic_cast<const CLI::ArgumentMismatch *>(&err) != nullptr) {
         return "missing_argument";
@@ -241,6 +346,18 @@ std::string parse_error_code(const CLI::ParseError &err)
     }
 
     return "parse_error";
+}
+
+std::string parse_error_message(const CLI::ParseError &err)
+{
+    const std::string message = err.what();
+    constexpr const char *port_prefix = "port: ";
+    constexpr std::size_t port_prefix_len = 6;
+    if (message.compare(0, port_prefix_len, port_prefix) == 0) {
+        return message.substr(port_prefix_len);
+    }
+
+    return message;
 }
 
 bool wombat_spi_available(std::string &message)
@@ -262,6 +379,44 @@ int run_side_btn(const OutputContext &output)
     }
 
     return emit_int_result(output, "side_btn", side_button());
+}
+
+int run_analog(const OutputContext &output, bool has_port, int port)
+{
+    std::string error_message;
+    if (!wombat_spi_available(error_message)) {
+        return emit_error(output, "wallaby_error", error_message);
+    }
+
+    if (has_port) {
+        return emit_port_value_result(output, "analog", port, analog(port));
+    }
+
+    int values[6];
+    for (int analog_port = 0; analog_port < 6; ++analog_port) {
+        values[analog_port] = analog(analog_port);
+    }
+
+    return emit_analog_values_result(output, values);
+}
+
+int run_digital(const OutputContext &output, bool has_port, int port)
+{
+    std::string error_message;
+    if (!wombat_spi_available(error_message)) {
+        return emit_error(output, "wallaby_error", error_message);
+    }
+
+    if (has_port) {
+        return emit_port_value_result(output, "digital", port, digital(port));
+    }
+
+    int values[10];
+    for (int digital_port = 0; digital_port < 10; ++digital_port) {
+        values[digital_port] = digital(digital_port);
+    }
+
+    return emit_digital_values_result(output, values);
 }
 
 int run_accel(const OutputContext &output, const std::string &axis)
@@ -361,6 +516,23 @@ int main(int argc, char **argv)
 
     auto *side_btn = app.add_subcommand("side_btn", "Read the side button");
 
+    int analog_port = -1;
+    auto *analog_cmd = app.add_subcommand("analog", "Read analog sensor ports");
+    CLI::Option *analog_port_option =
+        analog_cmd
+            ->add_option("port", analog_port, "Analog port to read: 0-5")
+            ->expected(0, 1)
+            ->check(analog_port_validator());
+
+    int digital_port = -1;
+    auto *digital_cmd =
+        app.add_subcommand("digital", "Read digital sensor ports");
+    CLI::Option *digital_port_option =
+        digital_cmd
+            ->add_option("port", digital_port, "Digital port to read: 0-9")
+            ->expected(0, 1)
+            ->check(digital_port_validator());
+
     try {
         app.parse(argc, argv);
     } catch (const CLI::ParseError &err) {
@@ -384,7 +556,10 @@ int main(int argc, char **argv)
         }
 
         return emit_error(
-            error_output, parse_error_code(err), err.what(), err.get_exit_code());
+            error_output,
+            parse_error_code(err),
+            parse_error_message(err),
+            err.get_exit_code());
     }
 
     if (id_option->count() > 0 && json_option->count() == 0) {
@@ -401,6 +576,15 @@ int main(int argc, char **argv)
 
     if (side_btn->parsed()) {
         return run_side_btn(output);
+    }
+
+    if (analog_cmd->parsed()) {
+        return run_analog(output, analog_port_option->count() > 0, analog_port);
+    }
+
+    if (digital_cmd->parsed()) {
+        return run_digital(
+            output, digital_port_option->count() > 0, digital_port);
     }
 
     if (accel->parsed()) {

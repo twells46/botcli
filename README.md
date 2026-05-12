@@ -35,6 +35,9 @@ Examples:
 botcli analog 0
 812
 
+botcli analog
+812 790 0 0 1023 511
+
 botcli accel x
 -14
 
@@ -49,7 +52,7 @@ Errors print a human-readable message to stderr and exit with a nonzero status.
 
 ```sh
 botcli analog 12
-error: analog port must be between 0 and 9
+error: analog port must be between 0 and 5
 ```
 
 For structured consumers, `botcli` should support global JSON output and an optional request ID:
@@ -62,6 +65,12 @@ In JSON mode, every normal response is written to stdout as exactly one JSON obj
 
 ```json
 {"ok":true,"id":"req-42","command":"analog","result":{"port":0,"value":812}}
+```
+
+When the port is omitted for analog or digital commands, default output includes all port values separated by spaces. JSON responses keep `result` as an object and return a `values` array whose index is the port number. Analog arrays are length 6 for ports `0-5`; digital arrays are length 10 for ports `0-9`.
+
+```json
+{"ok":true,"command":"analog","result":{"values":[812,790,0,0,1023,511]}}
 ```
 
 Axis-specific accelerometer, gyroscope, and magnetometer JSON responses include the requested axis and value:
@@ -79,7 +88,7 @@ When the axis is omitted for accelerometer, gyroscope, or magnetometer commands,
 JSON error responses still use a nonzero exit status:
 
 ```json
-{"ok":false,"id":"req-42","error":{"code":"invalid_port","message":"analog port must be between 0 and 9"}}
+{"ok":false,"id":"req-42","error":{"code":"invalid_port","message":"analog port must be between 0 and 5"}}
 ```
 
 Stderr is reserved for failures outside the normal JSON response contract, such as crashes, dynamic loader failures, or unexpected diagnostics before `botcli` can emit JSON.
@@ -94,7 +103,9 @@ JSON error codes should be stable machine-readable strings, such as `invalid_por
 
 `botcli` should validate command arguments before calling `libwallaby`.
 
-- Analog and digital ports: `0-9`
+- Digital ports: `0-9`
+- Analog ports: `0-5`
+- Analog sensor values: `0-4095`
 - Motor ports: `0-3`
 - Motor velocity: `-1500-1500`
 - Servo ports: `0-3`
@@ -168,7 +179,9 @@ Note: this function reads the value from the side button.
 
 **botcli**
 
-`botcli analog [0-9]` = `botcli analog <port>`
+`botcli analog [0-5]` = `botcli analog <port>`
+
+`botcli analog` returns all six analog ports as space-separated values in port order.
 
 ## Digital
 
@@ -179,6 +192,8 @@ Note: this function reads the value from the side button.
 **botcli**
 
 `botcli digital [0-9]` = `botcli digital <port>`
+
+`botcli digital` returns all ten digital ports as space-separated values in port order.
 
 ## Motors
 

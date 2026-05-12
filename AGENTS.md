@@ -34,6 +34,8 @@ For accelerometer, gyroscope, and magnetometer commands with no axis argument, d
 <x> <y> <z>\n
 ```
 
+For analog and digital commands with no port argument, default success output should be all port values in port order as space-separated values followed by a newline. Analog returns six values for ports `0-5`; digital returns ten values for ports `0-9`.
+
 Do not add labels or decorative text in default mode.
 
 Default errors should go to stderr with a nonzero exit status:
@@ -54,6 +56,12 @@ In JSON mode, every normal response goes to stdout as exactly one JSON object fo
 {"ok":true,"id":"req-42","command":"analog","result":{"port":0,"value":812}}
 ```
 
+When the port is omitted for analog or digital commands, return all port values in a `values` array inside the `result` object. The array index is the port number:
+
+```json
+{"ok":true,"command":"analog","result":{"values":[812,790,0,0,1023,511]}}
+```
+
 Axis-specific accelerometer, gyroscope, and magnetometer JSON responses should use:
 
 ```json
@@ -69,7 +77,7 @@ When the axis is omitted for those commands, return all axes:
 JSON errors use a nonzero exit status:
 
 ```json
-{"ok":false,"id":"req-42","error":{"code":"invalid_port","message":"analog port must be between 0 and 9"}}
+{"ok":false,"id":"req-42","error":{"code":"invalid_port","message":"analog port must be between 0 and 5"}}
 ```
 
 Reserve stderr in JSON mode for failures outside the normal response contract, such as crashes, dynamic loader failures, or unexpected diagnostics before `botcli` can emit JSON.
@@ -84,7 +92,8 @@ JSON error codes should be stable machine-readable strings, such as `invalid_por
 
 Validate arguments in `botcli` before calling `libwallaby`.
 
-- Analog and digital ports: `0-9`
+- Analog ports: `0-5`
+- Digital ports: `0-9`
 - Motor ports: `0-3`
 - Motor velocity: `-1500-1500`
 - Servo ports: `0-3`
