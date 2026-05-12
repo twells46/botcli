@@ -10,6 +10,8 @@ project(
 
 cpp = meson.get_compiler('cpp')
 
+project_includes = include_directories('src', 'third_party')
+
 kipr_dep = cpp.find_library('kipr', dirs : ['/usr/local/lib'])
 math_dep = cpp.find_library('m', required : false)
 zlib_dep = dependency('zlib', required : false)
@@ -18,7 +20,7 @@ threads_dep = dependency('threads')
 executable(
   'botcli',
   'src/main.cpp',
-  include_directories : include_directories('third_party'),
+  include_directories : project_includes,
   cpp_args : [
     '-I/usr/local/include',
     '-I/usr/local/include/include',
@@ -31,3 +33,11 @@ executable(
   ],
   install : true,
 )
+
+request_id_test = executable(
+  'request_id_test',
+  'tests/request_id_test.cpp',
+  include_directories : project_includes,
+)
+
+test('request_id', request_id_test)

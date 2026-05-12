@@ -13,12 +13,23 @@ The CLI is meant for humans at a shell and, more importantly, as a stable subpro
 - Build natively on the Raspberry Pi where `libwallaby` is installed.
 - Do not spend effort on cross-compilation yet.
 - Prefer Meson unless it creates unnecessary complications; CMake is acceptable only if Meson becomes awkward.
-- Use `third_party/CLI11.hpp` for parsing.
+- Use `third_party/CLI11.hpp` for CLI parsing wherever possible.
 - Use `third_party/picojson.h` for JSON output.
 - Use `third_party/lest.hpp` later for tests.
 - The third-party project READMEs in `third_party/*.md` are local reference material for those single-header dependencies.
 - `libwallaby/` is intentionally untracked and present only as local reference material.
 - `build-deploy.sh` is the expected compile path during development.
+- Plan a full `botcli` daemon as the persistent owner of `libwallaby`, but initially route only motor commands through it. Other commands may remain one-off direct `libwallaby` calls until there is a reason to migrate them.
+- The daemon is started explicitly with `botcli [--socket <path>] daemon [--motor-timeout-ms <ms>]` and stays in the foreground for supervision. It does not autostart for motor commands.
+- `--socket` is a global option. Daemon-backed motor commands use socket path precedence `--socket` > `BOTCLI_SOCKET` > default. Motor timeout precedence is `--motor-timeout-ms` > `BOTCLI_MOTOR_TIMEOUT` > indefinite timeout.
+- If `botcli motor ...` cannot connect to a running daemon, return a `daemon_unavailable` error. Other daemon transport errors should use stable codes such as `daemon_timeout` and `daemon_protocol_error`. Daemon-backed CLI clients should use an internal fixed response timeout, initially without a public CLI or environment option.
+- The daemon protocol is newline-delimited UTF-8 JSON. Requests have `id` optional, required string `command`, and required object `params`; use `{}` for no arguments. Initially support `motor.set`, `motor.off`, `motor.get`, and `motor.clear`.
+- Daemon request IDs follow the same rules as public `--id`. Reject unknown top-level fields, unknown param fields, and non-integral or non-number values for integer parameters.
+- Do not implement `motor set` as one detached child process per request. `mav` stops when the calling process exits, and per-request background setters would race with `motor off`.
+- `motor get` means `gmpc(port)` and returns the motor position counter in ticks. `motor off` uses passive `off()` / `ao()` semantics, not active braking.
+- If motor timeout is configured, every `motor.set`, including velocity `0`, calls `mav(port, velocity)` and refreshes that port's deadline. The dispatcher must also wait for timeout deadlines and stop expired ports through the same serialized hardware path. Without a timeout, a set motor runs until an applicable `motor off` or daemon shutdown.
+- Reject non-integral, negative, or zero motor timeout values from `--motor-timeout-ms` or `BOTCLI_MOTOR_TIMEOUT`; valid timeout values are positive integer milliseconds.
+- The daemon should serialize motor hardware calls through one dispatcher thread or equivalent global hardware mutex, and should stop all motors on clean shutdown and SIGINT/SIGTERM.
 
 ## Output contract
 
