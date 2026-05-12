@@ -14,6 +14,7 @@ extern "C" {
 #include <kipr/digital/digital.h>
 #include <kipr/gyro/gyro.h>
 #include <kipr/magneto/magneto.h>
+#include <kipr/servo/servo.h>
 }
 
 namespace {
@@ -94,6 +95,57 @@ CLI::Validator digital_port_validator()
         },
         "0-9",
         "DIGITAL_PORT");
+}
+
+CLI::Validator servo_port_validator()
+{
+    CLI::Range port_range(0, 3);
+
+    return CLI::Validator(
+        [port_range](std::string &input) {
+            std::string checked_input = input;
+            if (!port_range(checked_input).empty()) {
+                return std::string("servo port must be between 0 and 3");
+            }
+
+            return std::string();
+        },
+        "0-3",
+        "SERVO_PORT");
+}
+
+CLI::Validator servo_enabled_validator()
+{
+    CLI::Range enabled_range(0, 1);
+
+    return CLI::Validator(
+        [enabled_range](std::string &input) {
+            std::string checked_input = input;
+            if (!enabled_range(checked_input).empty()) {
+                return std::string("servo enabled value must be 0 or 1");
+            }
+
+            return std::string();
+        },
+        "0|1",
+        "SERVO_ENABLED");
+}
+
+CLI::Validator servo_position_validator()
+{
+    CLI::Range position_range(0, 2047);
+
+    return CLI::Validator(
+        [position_range](std::string &input) {
+            std::string checked_input = input;
+            if (!position_range(checked_input).empty()) {
+                return std::string("servo position must be between 0 and 2047");
+            }
+
+            return std::string();
+        },
+        "0-2047",
+        "SERVO_POSITION");
 }
 
 RawGlobalOptions inspect_raw_global_options(int argc, char **argv)
@@ -253,6 +305,61 @@ int emit_digital_values_result(const OutputContext &output, const int values[10]
     return emit_json_result(output, "digital", result);
 }
 
+int emit_servo_values_result(const OutputContext &output,
+                             const std::string &command,
+                             const int values[4])
+{
+    if (!output.json) {
+        for (int port = 0; port < 4; ++port) {
+            if (port != 0) {
+                std::cout << " ";
+            }
+            std::cout << values[port];
+        }
+        std::cout << '\n';
+        return 0;
+    }
+
+    picojson::array json_values;
+    for (int port = 0; port < 4; ++port) {
+        json_values.push_back(json_int(values[port]));
+    }
+
+    picojson::object result;
+    result["values"] = picojson::value(json_values);
+    return emit_json_result(output, command, result);
+}
+
+int emit_servo_set_enabled_result(const OutputContext &output,
+                                  int port,
+                                  int enabled)
+{
+    if (!output.json) {
+        std::cout << "ok\n";
+        return 0;
+    }
+
+    picojson::object result;
+    result["port"] = json_int(port);
+    result["enabled"] = json_int(enabled);
+    return emit_json_result(output, "servo.set_enabled", result);
+}
+
+int emit_servo_set_position_result(const OutputContext &output,
+                                   int port,
+                                   int position)
+{
+    if (!output.json) {
+        std::cout << "ok\n";
+        return 0;
+    }
+
+    picojson::object result;
+    result["port"] = json_int(port);
+    result["position"] = json_int(position);
+    return emit_json_result(output, "servo.set", result);
+}
+
 bool is_axis(const std::string &axis)
 {
     return axis == "x" || axis == "y" || axis == "z";
@@ -332,8 +439,19 @@ std::string parse_error_code(const CLI::ParseError &err)
     const std::string message = err.what();
     if (dynamic_cast<const CLI::ValidationError *>(&err) != nullptr &&
         (message.find("analog port") != std::string::npos ||
-         message.find("digital port") != std::string::npos)) {
+         message.find("digital port") != std::string::npos ||
+         message.find("servo port") != std::string::npos)) {
         return "invalid_port";
+    }
+
+    if (dynamic_cast<const CLI::ValidationError *>(&err) != nullptr &&
+        message.find("servo enabled") != std::string::npos) {
+        return "invalid_enabled";
+    }
+
+    if (dynamic_cast<const CLI::ValidationError *>(&err) != nullptr &&
+        message.find("servo position") != std::string::npos) {
+        return "invalid_position";
     }
 
     if (dynamic_cast<const CLI::RequiredError *>(&err) != nullptr ||
@@ -351,10 +469,12 @@ std::string parse_error_code(const CLI::ParseError &err)
 std::string parse_error_message(const CLI::ParseError &err)
 {
     const std::string message = err.what();
-    constexpr const char *port_prefix = "port: ";
-    constexpr std::size_t port_prefix_len = 6;
-    if (message.compare(0, port_prefix_len, port_prefix) == 0) {
-        return message.substr(port_prefix_len);
+    const std::string prefixes[] = {"port: ", "enabled: ", "position: "};
+
+    for (const std::string &prefix : prefixes) {
+        if (message.compare(0, prefix.size(), prefix) == 0) {
+            return message.substr(prefix.size());
+        }
     }
 
     return message;
@@ -417,6 +537,68 @@ int run_digital(const OutputContext &output, bool has_port, int port)
     }
 
     return emit_digital_values_result(output, values);
+}
+
+int run_servo_get_enabled(const OutputContext &output, bool has_port, int port)
+{
+    std::string error_message;
+    if (!wombat_spi_available(error_message)) {
+        return emit_error(output, "wallaby_error", error_message);
+    }
+
+    if (has_port) {
+        return emit_port_value_result(
+            output, "servo.get_enabled", port, get_servo_enabled(port));
+    }
+
+    int values[4];
+    for (int servo_port = 0; servo_port < 4; ++servo_port) {
+        values[servo_port] = get_servo_enabled(servo_port);
+    }
+
+    return emit_servo_values_result(output, "servo.get_enabled", values);
+}
+
+int run_servo_get_position(const OutputContext &output, bool has_port, int port)
+{
+    std::string error_message;
+    if (!wombat_spi_available(error_message)) {
+        return emit_error(output, "wallaby_error", error_message);
+    }
+
+    if (has_port) {
+        return emit_port_value_result(
+            output, "servo.get", port, get_servo_position(port));
+    }
+
+    int values[4];
+    for (int servo_port = 0; servo_port < 4; ++servo_port) {
+        values[servo_port] = get_servo_position(servo_port);
+    }
+
+    return emit_servo_values_result(output, "servo.get", values);
+}
+
+int run_servo_set_enabled(const OutputContext &output, int port, int enabled)
+{
+    std::string error_message;
+    if (!wombat_spi_available(error_message)) {
+        return emit_error(output, "wallaby_error", error_message);
+    }
+
+    set_servo_enabled(port, enabled);
+    return emit_servo_set_enabled_result(output, port, enabled);
+}
+
+int run_servo_set_position(const OutputContext &output, int port, int position)
+{
+    std::string error_message;
+    if (!wombat_spi_available(error_message)) {
+        return emit_error(output, "wallaby_error", error_message);
+    }
+
+    set_servo_position(port, position);
+    return emit_servo_set_position_result(output, port, position);
 }
 
 int run_accel(const OutputContext &output, const std::string &axis)
@@ -533,6 +715,58 @@ int main(int argc, char **argv)
             ->expected(0, 1)
             ->check(digital_port_validator());
 
+    auto *servo = app.add_subcommand("servo", "Read and write servo ports");
+    servo->require_subcommand(1);
+
+    int servo_get_enabled_port = -1;
+    auto *servo_get_enabled =
+        servo->add_subcommand("get_enabled", "Read servo enable state");
+    CLI::Option *servo_get_enabled_port_option =
+        servo_get_enabled
+            ->add_option(
+                "port", servo_get_enabled_port, "Servo port to read: 0-3")
+            ->expected(0, 1)
+            ->check(servo_port_validator());
+
+    int servo_get_position_port = -1;
+    auto *servo_get = servo->add_subcommand("get", "Read servo position");
+    CLI::Option *servo_get_position_port_option =
+        servo_get
+            ->add_option(
+                "port", servo_get_position_port, "Servo port to read: 0-3")
+            ->expected(0, 1)
+            ->check(servo_port_validator());
+
+    int servo_set_enabled_port = -1;
+    int servo_set_enabled_value = -1;
+    auto *servo_set_enabled =
+        servo->add_subcommand("set_enabled", "Set servo enable state");
+    servo_set_enabled
+        ->add_option(
+            "port", servo_set_enabled_port, "Servo port to write: 0-3")
+        ->required()
+        ->check(servo_port_validator());
+    servo_set_enabled
+        ->add_option("enabled",
+                     servo_set_enabled_value,
+                     "Servo enabled value: 0 or 1")
+        ->required()
+        ->check(servo_enabled_validator());
+
+    int servo_set_position_port = -1;
+    int servo_set_position_value = -1;
+    auto *servo_set = servo->add_subcommand("set", "Set servo position");
+    servo_set
+        ->add_option(
+            "port", servo_set_position_port, "Servo port to write: 0-3")
+        ->required()
+        ->check(servo_port_validator());
+    servo_set
+        ->add_option(
+            "position", servo_set_position_value, "Servo position: 0-2047")
+        ->required()
+        ->check(servo_position_validator());
+
     try {
         app.parse(argc, argv);
     } catch (const CLI::ParseError &err) {
@@ -585,6 +819,28 @@ int main(int argc, char **argv)
     if (digital_cmd->parsed()) {
         return run_digital(
             output, digital_port_option->count() > 0, digital_port);
+    }
+
+    if (servo_get_enabled->parsed()) {
+        return run_servo_get_enabled(output,
+                                     servo_get_enabled_port_option->count() > 0,
+                                     servo_get_enabled_port);
+    }
+
+    if (servo_get->parsed()) {
+        return run_servo_get_position(output,
+                                      servo_get_position_port_option->count() > 0,
+                                      servo_get_position_port);
+    }
+
+    if (servo_set_enabled->parsed()) {
+        return run_servo_set_enabled(
+            output, servo_set_enabled_port, servo_set_enabled_value);
+    }
+
+    if (servo_set->parsed()) {
+        return run_servo_set_position(
+            output, servo_set_position_port, servo_set_position_value);
     }
 
     if (accel->parsed()) {

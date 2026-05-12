@@ -46,7 +46,12 @@ botcli accel
 
 botcli servo get_enabled 2
 1
+
+botcli servo set 2 1200
+ok
 ```
+
+Writer commands that do not return a hardware value should print `ok` on success. This acknowledges that the request executed without implying a readback of the written value.
 
 Errors print a human-readable message to stderr and exit with a nonzero status.
 
@@ -67,7 +72,7 @@ In JSON mode, every normal response is written to stdout as exactly one JSON obj
 {"ok":true,"id":"req-42","command":"analog","result":{"port":0,"value":812}}
 ```
 
-When the port is omitted for analog or digital commands, default output includes all port values separated by spaces. JSON responses keep `result` as an object and return a `values` array whose index is the port number. Analog arrays are length 6 for ports `0-5`; digital arrays are length 10 for ports `0-9`.
+When the port is omitted for analog, digital, or servo reader commands, default output includes all port values separated by spaces. JSON responses keep `result` as an object and return a `values` array whose index is the port number. Analog arrays are length 6 for ports `0-5`; digital arrays are length 10 for ports `0-9`; servo reader arrays are length 4 for ports `0-3`.
 
 ```json
 {"ok":true,"command":"analog","result":{"values":[812,790,0,0,1023,511]}}
@@ -83,6 +88,13 @@ When the axis is omitted for accelerometer, gyroscope, or magnetometer commands,
 
 ```json
 {"ok":true,"command":"accel","result":{"x":-14,"y":3,"z":1021}}
+```
+
+Writer command JSON responses should include the requested write parameters in `result`, while still treating `ok:true` as the acknowledgement:
+
+```json
+{"ok":true,"command":"servo.set_enabled","result":{"port":1,"enabled":1}}
+{"ok":true,"command":"servo.set","result":{"port":1,"position":1200}}
 ```
 
 JSON error responses still use a nonzero exit status:
@@ -226,8 +238,6 @@ Shortnames for `get_motor_position_counter` and `clear_motor_position_counter`.
 **libwallaby**
 
 - `set_servo_enabled(int port, int enabled)`
-- `enable_servos()`
-- `disable_servos()`
 - `get_servo_enabled(int port)`
 - `get_servo_position(int port)`
 - `set_servo_position(int port, int position)`
@@ -238,9 +248,19 @@ Shortnames for `get_motor_position_counter` and `clear_motor_position_counter`.
 
 `botcli servo get_enabled [0-3]` = `botcli servo get_enabled <port>`
 
+`botcli servo get_enabled` returns all four enabled values as space-separated values in port order.
+
 `botcli servo set [0-3] [0-2047]` = `botcli servo set <port> <position>`
 
 `botcli servo get [0-3]` = `botcli servo get <port>`
+
+`botcli servo get` returns all four servo positions as space-separated values in port order.
+
+Servo writer commands require an explicit port. Omitting the port is only an "all ports" shortcut for reader commands.
+
+On success, servo writer commands print `ok` in default mode. In JSON mode, they return `ok:true` and include the requested `port` plus `enabled` or `position` value in `result`. This is an acknowledgement of the write request, not a hardware readback.
+
+Bulk servo writes are a possible future extension, but are not part of the initial command set. If added later, they should be explicit, such as `botcli servo set_enabled all <enabled>` or `botcli servo set all <position>`, and may use the libwallaby helpers `enable_servos()` and `disable_servos()` where appropriate.
 
 ## Camera
 

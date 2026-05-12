@@ -34,7 +34,15 @@ For accelerometer, gyroscope, and magnetometer commands with no axis argument, d
 <x> <y> <z>\n
 ```
 
-For analog and digital commands with no port argument, default success output should be all port values in port order as space-separated values followed by a newline. Analog returns six values for ports `0-5`; digital returns ten values for ports `0-9`.
+For analog, digital, and servo reader commands with no port argument, default success output should be all port values in port order as space-separated values followed by a newline. Analog returns six values for ports `0-5`; digital returns ten values for ports `0-9`; servo reader commands return four values for ports `0-3`.
+
+Writer commands that do not return a hardware value should acknowledge success as:
+
+```text
+ok\n
+```
+
+This indicates the request executed without implying that the value was read back from hardware.
 
 Do not add labels or decorative text in default mode.
 
@@ -56,7 +64,7 @@ In JSON mode, every normal response goes to stdout as exactly one JSON object fo
 {"ok":true,"id":"req-42","command":"analog","result":{"port":0,"value":812}}
 ```
 
-When the port is omitted for analog or digital commands, return all port values in a `values` array inside the `result` object. The array index is the port number:
+When the port is omitted for analog, digital, or servo reader commands, return all port values in a `values` array inside the `result` object. The array index is the port number:
 
 ```json
 {"ok":true,"command":"analog","result":{"values":[812,790,0,0,1023,511]}}
@@ -72,6 +80,13 @@ When the axis is omitted for those commands, return all axes:
 
 ```json
 {"ok":true,"command":"accel","result":{"x":-14,"y":3,"z":1021}}
+```
+
+Writer command JSON responses should include the requested write parameters in `result`, while using `ok:true` as the acknowledgement:
+
+```json
+{"ok":true,"command":"servo.set_enabled","result":{"port":1,"enabled":1}}
+{"ok":true,"command":"servo.set","result":{"port":1,"position":1200}}
 ```
 
 JSON errors use a nonzero exit status:
@@ -99,6 +114,24 @@ Validate arguments in `botcli` before calling `libwallaby`.
 - Servo ports: `0-3`
 - Servo enabled values: `0` or `1`
 - Servo positions: `0-2047`
+
+## Servo commands
+
+Servo reader commands follow the same omitted-port pattern as analog and digital reads:
+
+- `botcli servo get_enabled [port]`
+- `botcli servo get [port]`
+
+When `port` is omitted, return all four values in port order.
+
+Servo writer commands require an explicit port:
+
+- `botcli servo set_enabled <port> <enabled>`
+- `botcli servo set <port> <position>`
+
+On success, servo writer commands print `ok` in default mode. In JSON mode, they return `ok:true` and include the requested `port` plus `enabled` or `position` value in `result`. This is an acknowledgement of the write request, not a hardware readback.
+
+Do not treat an omitted port as a bulk write for servo writer commands. Bulk servo writes are a possible future extension, but should be explicit if added later, such as `botcli servo set_enabled all <enabled>` or `botcli servo set all <position>`.
 
 ## Initial scope
 
