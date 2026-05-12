@@ -8,7 +8,10 @@
 #include "picojson.h"
 
 extern "C" {
+#include <kipr/accel/accel.h>
 #include <kipr/button/button.h>
+#include <kipr/gyro/gyro.h>
+#include <kipr/magneto/magneto.h>
 }
 
 namespace {
@@ -124,16 +127,10 @@ int emit_error(const OutputContext &output,
     return exit_code;
 }
 
-int emit_result(const OutputContext &output,
-                const std::string &command,
-                const std::string &plain_value,
-                const picojson::object &result)
+int emit_json_result(const OutputContext &output,
+                     const std::string &command,
+                     const picojson::object &result)
 {
-    if (!output.json) {
-        std::cout << plain_value << '\n';
-        return 0;
-    }
-
     picojson::object response;
     response["ok"] = picojson::value(true);
     add_optional_id(response, output);
@@ -148,9 +145,88 @@ int emit_int_result(const OutputContext &output,
                     const std::string &command,
                     int value)
 {
+    if (!output.json) {
+        std::cout << value << '\n';
+        return 0;
+    }
+
     picojson::object result;
     result["value"] = json_int(value);
-    return emit_result(output, command, std::to_string(value), result);
+    return emit_json_result(output, command, result);
+}
+
+bool is_axis(const std::string &axis)
+{
+    return axis == "x" || axis == "y" || axis == "z";
+}
+
+int read_accel_axis(const std::string &axis)
+{
+    if (axis == "x") {
+        return accel_x();
+    }
+    if (axis == "y") {
+        return accel_y();
+    }
+    return accel_z();
+}
+
+int read_gyro_axis(const std::string &axis)
+{
+    if (axis == "x") {
+        return gyro_x();
+    }
+    if (axis == "y") {
+        return gyro_y();
+    }
+    return gyro_z();
+}
+
+int read_magneto_axis(const std::string &axis)
+{
+    if (axis == "x") {
+        return magneto_x();
+    }
+    if (axis == "y") {
+        return magneto_y();
+    }
+    return magneto_z();
+}
+
+int emit_axis_result(const OutputContext &output,
+                     const std::string &command,
+                     const std::string &axis,
+                     int value)
+{
+    if (!output.json) {
+        std::cout << value << '\n';
+        return 0;
+    }
+
+    picojson::object result;
+    result["axis"] = picojson::value(axis);
+    result["value"] = json_int(value);
+
+    return emit_json_result(output, command, result);
+}
+
+int emit_xyz_result(const OutputContext &output,
+                    const std::string &command,
+                    int x,
+                    int y,
+                    int z)
+{
+    if (!output.json) {
+        std::cout << x << " " << y << " " << z << '\n';
+        return 0;
+    }
+
+    picojson::object result;
+    result["x"] = json_int(x);
+    result["y"] = json_int(y);
+    result["z"] = json_int(z);
+
+    return emit_json_result(output, command, result);
 }
 
 std::string parse_error_code(const CLI::ParseError &err)
@@ -188,6 +264,68 @@ int run_side_btn(const OutputContext &output)
     return emit_int_result(output, "side_btn", side_button());
 }
 
+int run_accel(const OutputContext &output, const std::string &axis)
+{
+    if (!axis.empty() && !is_axis(axis)) {
+        return emit_error(output,
+                          "invalid_axis",
+                          "axis must be one of x, y, or z");
+    }
+
+    std::string error_message;
+    if (!wombat_spi_available(error_message)) {
+        return emit_error(output, "wallaby_error", error_message);
+    }
+
+    if (!axis.empty()) {
+        return emit_axis_result(output, "accel", axis, read_accel_axis(axis));
+    }
+
+    return emit_xyz_result(output, "accel", accel_x(), accel_y(), accel_z());
+}
+
+int run_gyro(const OutputContext &output, const std::string &axis)
+{
+    if (!axis.empty() && !is_axis(axis)) {
+        return emit_error(output,
+                          "invalid_axis",
+                          "axis must be one of x, y, or z");
+    }
+
+    std::string error_message;
+    if (!wombat_spi_available(error_message)) {
+        return emit_error(output, "wallaby_error", error_message);
+    }
+
+    if (!axis.empty()) {
+        return emit_axis_result(output, "gyro", axis, read_gyro_axis(axis));
+    }
+
+    return emit_xyz_result(output, "gyro", gyro_x(), gyro_y(), gyro_z());
+}
+
+int run_magneto(const OutputContext &output, const std::string &axis)
+{
+    if (!axis.empty() && !is_axis(axis)) {
+        return emit_error(output,
+                          "invalid_axis",
+                          "axis must be one of x, y, or z");
+    }
+
+    std::string error_message;
+    if (!wombat_spi_available(error_message)) {
+        return emit_error(output, "wallaby_error", error_message);
+    }
+
+    if (!axis.empty()) {
+        return emit_axis_result(
+            output, "magneto", axis, read_magneto_axis(axis));
+    }
+
+    return emit_xyz_result(
+        output, "magneto", magneto_x(), magneto_y(), magneto_z());
+}
+
 }  // namespace
 
 int main(int argc, char **argv)
@@ -202,6 +340,24 @@ int main(int argc, char **argv)
         app.add_flag("--json", output.json, "Write one JSON object per response");
     CLI::Option *id_option =
         app.add_option("--id", output.id, "Request ID for JSON responses");
+
+    std::string accel_axis;
+    auto *accel = app.add_subcommand("accel", "Read the accelerometer");
+    accel
+        ->add_option("axis", accel_axis, "Axis to read: x, y, or z")
+        ->expected(0, 1);
+
+    std::string gyro_axis;
+    auto *gyro = app.add_subcommand("gyro", "Read the gyroscope");
+    gyro
+        ->add_option("axis", gyro_axis, "Axis to read: x, y, or z")
+        ->expected(0, 1);
+
+    std::string magneto_axis;
+    auto *magneto = app.add_subcommand("magneto", "Read the magnetometer");
+    magneto
+        ->add_option("axis", magneto_axis, "Axis to read: x, y, or z")
+        ->expected(0, 1);
 
     auto *side_btn = app.add_subcommand("side_btn", "Read the side button");
 
@@ -245,6 +401,18 @@ int main(int argc, char **argv)
 
     if (side_btn->parsed()) {
         return run_side_btn(output);
+    }
+
+    if (accel->parsed()) {
+        return run_accel(output, accel_axis);
+    }
+
+    if (gyro->parsed()) {
+        return run_gyro(output, gyro_axis);
+    }
+
+    if (magneto->parsed()) {
+        return run_magneto(output, magneto_axis);
     }
 
     return emit_error(output, "unknown_command", "unknown command");
