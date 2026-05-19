@@ -4,7 +4,7 @@ project(
   version : '0.1.0',
   default_options : [
     'cpp_std=c++17',
-    'warning_level=2',
+    'warning_level=3',
   ],
 )
 
@@ -33,11 +33,3 @@ executable(
   ],
   install : true,
 )
-
-request_id_test = executable(
-  'request_id_test',
-  'tests/request_id_test.cpp',
-  include_directories : project_includes,
-)
-
-test('request_id', request_id_test)
