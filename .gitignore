@@ -4,3 +4,7 @@ compile_commands.json
 *.user
 *.swp
 *.swo
+*.deb
+.serena/
+libwallaby/
+usr/
