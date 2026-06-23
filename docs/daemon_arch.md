@@ -1,14 +1,14 @@
 # Daemon Architecture
 
-`botcli` uses a foreground daemon as the single process that touches `libwallaby`.
-CLI commands are thin clients: validate CLI arguments, send one daemon request, read one daemon response, then adapt that response to default or JSON output.
+`botcli` is a foreground daemon and the single process that touches `libwallaby`.
+External clients connect over a Unix domain socket, send newline-delimited JSON requests, and read newline-delimited JSON responses.
 
 ## Startup
 
 Run:
 
 ```text
-botcli [--socket <path>] daemon [--motor-timeout-ms <ms>]
+botcli [--socket <path>] [--motor-timeout-ms <ms>]
 ```
 
 The daemon:
@@ -39,7 +39,7 @@ Request shape:
 
 Fields:
 
-- `id`: optional request ID using the same rules as public `--id`
+- `id`: optional request ID; 1-128 characters, ASCII letters, digits, `.`, `_`, `:`, and `-` only
 - `command`: required string
 - `params`: required object; use `{}` for no arguments
 
@@ -87,15 +87,51 @@ Example responses:
 {"ok":false,"id":"req-42","error":{"code":"invalid_velocity","message":"motor velocity must be between -1500 and 1500"}}
 ```
 
-Transport errors use stable codes:
+When `id` is absent from the request, omit `id` from the response.
 
-- `daemon_unavailable`: socket missing, connection refused, or connect failure
-- `daemon_timeout`: client timed out waiting for daemon response, or daemon timed out reading request
-- `daemon_protocol_error`: malformed daemon request or response
+Transport and protocol error codes:
+
+- `daemon_timeout`: daemon timed out reading a request line
+- `daemon_protocol_error`: malformed JSON, unknown fields, oversized line
 - `daemon_shutting_down`: request rejected during shutdown
 
-CLI clients use a fixed internal response timeout.
-There is no public client timeout option yet.
+Stable validation error codes include `invalid_port`, `invalid_velocity`, `invalid_position`, `invalid_id`, `invalid_axis`, `missing_argument`, and `unknown_command`.
+
+## Response shapes
+
+Success responses have `ok:true`, optional `id`, `command`, and a `result` object.
+
+Single-value reads:
+
+```json
+{"ok":true,"command":"analog","result":{"port":0,"value":812}}
+```
+
+Bulk reads (port omitted):
+
+```json
+{"ok":true,"command":"analog","result":{"values":[812,790,0,0,1023,511]}}
+```
+
+Axis-specific sensor reads:
+
+```json
+{"ok":true,"command":"accel","result":{"axis":"x","value":-14}}
+```
+
+All axes (axis omitted):
+
+```json
+{"ok":true,"command":"accel","result":{"x":-14,"y":3,"z":1021}}
+```
+
+Writer acknowledgements include requested parameters:
+
+```json
+{"ok":true,"command":"servo.set_enabled","result":{"port":1,"enabled":1}}
+{"ok":true,"command":"servo.set","result":{"port":1,"position":1200}}
+{"ok":true,"command":"motor.set","result":{"port":0,"velocity":600}}
+```
 
 ## Dispatch
 
@@ -104,7 +140,6 @@ Accepted client requests are parsed and validated, then queued as work items.
 The dispatcher is the only thread that calls `libwallaby`.
 
 Current implementation handles accepted socket connections inline in the accept loop.
-Normal CLI clients send one request and close, so this keeps code small.
 Long-lived concurrent clients need a future socket-handler thread or polling loop before they can share the daemon fairly.
 
 Dispatcher flow:
@@ -117,8 +152,7 @@ Queue order defines command order.
 Protocol errors that do not touch hardware are answered before entering the queue.
 
 Request line limit is 64 KiB.
-Daemon request read timeout is 2 seconds.
-Client response timeout is 2 seconds.
+Daemon request read timeout is 2 seconds per request line.
 
 ## Motor Semantics
 
@@ -158,3 +192,18 @@ With timeout configured:
 
 The dispatcher waits for queued work or the nearest motor deadline, whichever comes first.
 Expired timeout stops and client work both pass through the same serialized hardware path.
+
+## Validation
+
+The daemon validates all request parameters at the socket boundary.
+
+- Analog ports: `0-5`
+- Digital ports: `0-9`
+- Motor ports: `0-3`
+- Motor velocity: `-1500-1500`
+- Servo ports: `0-3`
+- Servo enabled values: `0` or `1`
+- Servo positions: `0-2047`
+
+Servo reader commands accept an omitted `port` and return all four values in `result.values`.
+Servo writer commands require an explicit `port`.

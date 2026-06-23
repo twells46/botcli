@@ -20,7 +20,6 @@
 #include <thread>
 #include <unistd.h>
 
-#include "CLI11.hpp"
 #include "picojson.h"
 
 extern "C" {
@@ -42,7 +41,6 @@ constexpr const char *REQUEST_ID_RULE_MESSAGE =
 	"digits, '.', '_', ':', and '-'";
 constexpr std::size_t MAX_DAEMON_REQUEST_LINE = 64 * 1024;
 constexpr int DAEMON_REQUEST_READ_TIMEOUT_SECONDS = 2;
-constexpr int DAEMON_CLIENT_RESPONSE_TIMEOUT_SECONDS = 2;
 const std::array<std::string, 14> DAEMON_ALLOWED_COMMANDS = {
 	"accel",
 	"analog",
@@ -63,18 +61,6 @@ const std::array<std::string, 14> DAEMON_ALLOWED_COMMANDS = {
 // Set only from async signal handlers; the main daemon loop observes this and
 // moves shutdown back into normal C++ control flow.
 volatile sig_atomic_t daemon_shutdown_requested = 0;
-
-struct OutputContext {
-	bool json = false;
-	std::string id;
-};
-
-struct RawGlobalOptions {
-	bool json = false;
-	bool has_id = false;
-	bool id_missing_value = false;
-	std::string id;
-};
 
 struct DaemonRequest {
 	std::string id;
@@ -120,52 +106,9 @@ picojson::value json_int(int value)
 	return picojson::value(static_cast<double>(value));
 }
 
-CLI::Validator range_validator(const std::string &name, int minimum,
-			       int maximum, const std::string &description,
-			       const std::string &type_name)
-{
-	CLI::Range range(minimum, maximum);
-
-	return CLI::Validator(
-		[range, name, minimum, maximum](std::string &input) {
-			std::string checked_input = input;
-			if (!range(checked_input).empty()) {
-				return name + " must be between " +
-				       std::to_string(minimum) + " and " +
-				       std::to_string(maximum);
-			}
-
-			return std::string();
-		},
-		description, type_name);
-}
-
-CLI::Validator servo_port_validator()
-{
-	return range_validator("servo port", 0, 3, "0-3", "SERVO_PORT");
-}
-
-CLI::Validator motor_port_validator()
-{
-	return range_validator("motor port", 0, 3, "0-3", "MOTOR_PORT");
-}
-
 bool is_axis(const std::string &axis)
 {
 	return axis == "x" || axis == "y" || axis == "z";
-}
-
-CLI::Validator axis_validator(const std::string &description,
-			      const std::string &type_name)
-{
-	return CLI::Validator(
-		[](std::string &input) {
-			if (is_axis(input)) {
-				return "";
-			}
-			return "Invalid axis -- axis must be one of x y z";
-		},
-		description, type_name);
 }
 
 bool is_request_id_char(char ch)
@@ -190,87 +133,9 @@ bool is_valid_request_id(const std::string &id)
 	return true;
 }
 
-CLI::Validator id_validator(const std::string &description,
-			    const std::string &type_name)
-{
-	return CLI::Validator(
-		[](std::string &input) {
-			if (is_valid_request_id(input)) {
-				return "";
-			}
-			return REQUEST_ID_RULE_MESSAGE;
-		},
-		description, type_name);
-}
-
-RawGlobalOptions inspect_raw_global_options(int argc, char **argv)
-{
-	RawGlobalOptions options;
-
-	for (int i = 1; i < argc; ++i) {
-		const std::string arg = argv[i];
-		if (arg == "--json") {
-			options.json = true;
-			continue;
-		}
-
-		if (arg == "--id") {
-			options.has_id = true;
-			if (i + 1 >= argc) {
-				options.id_missing_value = true;
-				continue;
-			}
-			options.id = argv[++i];
-			continue;
-		}
-
-		constexpr const char *id_prefix = "--id=";
-		constexpr std::size_t id_prefix_len = 5;
-		if (arg.compare(0, id_prefix_len, id_prefix) == 0) {
-			options.has_id = true;
-			options.id = arg.substr(id_prefix_len);
-		}
-	}
-
-	return options;
-}
-
-void add_optional_id(picojson::object &object, const OutputContext &output)
-{
-	if (!output.id.empty()) {
-		object["id"] = picojson::value(output.id);
-	}
-}
-
-void write_json(const picojson::object &object)
-{
-	std::cout << picojson::value(object).serialize() << '\n';
-}
-
 std::string make_json_line(const picojson::object &object)
 {
 	return picojson::value(object).serialize() + "\n";
-}
-
-int emit_error(const OutputContext &output, const std::string &code,
-	       const std::string &message, int exit_code = 1)
-{
-	if (!output.json) {
-		std::cerr << "error: " << message << '\n';
-		return exit_code;
-	}
-
-	picojson::object error;
-	error["code"] = picojson::value(code);
-	error["message"] = picojson::value(message);
-
-	picojson::object response;
-	response["ok"] = picojson::value(false);
-	add_optional_id(response, output);
-	response["error"] = picojson::value(error);
-
-	write_json(response);
-	return exit_code;
 }
 
 picojson::object make_daemon_error(const std::string &id,
@@ -500,8 +365,6 @@ bool validate_daemon_params(const std::string &command,
 			    const picojson::object &params, std::string &code,
 			    std::string &message)
 {
-	// The daemon is a trust boundary, so repeat validation here even though the
-	// built-in CLI client validates its own arguments before sending a request.
 	std::string unknown_field;
 	if (!params_have_only_fields(params, command, unknown_field)) {
 		code = "daemon_protocol_error";
@@ -624,9 +487,6 @@ bool parse_daemon_request_line(const std::string &line, DaemonRequest &request,
 	}
 
 	std::string id;
-	// Note: `object.find` returns an iterator at the requested element.
-	// If element doesn't exist, it returns the past-the-end sentinel
-	// iterator `end()`, hence the `object.end()` comparison below.
 	const auto id_field = object.find("id");
 	if (id_field != object.end()) {
 		if (!id_field->second.is<std::string>()) {
@@ -706,68 +566,6 @@ bool write_all(int fd, const std::string &data)
 	}
 
 	return true;
-}
-
-bool read_daemon_response_line(int fd, std::string &line, std::string &code)
-{
-	timeval timeout;
-	timeout.tv_sec = DAEMON_CLIENT_RESPONSE_TIMEOUT_SECONDS;
-	timeout.tv_usec = 0;
-	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-
-	line.clear();
-	char ch = '\0';
-	while (true) {
-		const ssize_t rc = read(fd, &ch, 1);
-		if (rc == 0) {
-			code = "daemon_protocol_error";
-			return false;
-		}
-
-		if (rc < 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				code = "daemon_timeout";
-				return false;
-			}
-			code = "daemon_protocol_error";
-			return false;
-		}
-
-		if (ch == '\n') {
-			if (!line.empty() && line.back() == '\r') {
-				line.pop_back();
-			}
-			return true;
-		}
-
-		line.push_back(ch);
-		if (line.size() > MAX_DAEMON_REQUEST_LINE) {
-			code = "daemon_protocol_error";
-			return false;
-		}
-	}
-}
-
-bool parse_daemon_response_line(const std::string &line,
-				picojson::object &response)
-{
-	std::string parse_message;
-	return parse_json_object_line(line, response, parse_message,
-				      "daemon response must be a JSON object");
-}
-
-bool read_result_int(const picojson::object &result, const std::string &name,
-		     int &value)
-{
-	const auto found = result.find(name);
-	if (found == result.end()) {
-		return false;
-	}
-
-	return json_int_value(found->second, value);
 }
 
 int read_validated_int_param(const picojson::object &params,
@@ -1065,10 +863,6 @@ void run_hardware_dispatcher(DaemonRuntime &runtime)
 			continue;
 		}
 
-		// Do not hold the runtime mutex while touching hardware. The queue
-		// already establishes command order, and releasing the lock lets socket
-		// handlers enqueue later requests or observe shutdown while libwallaby
-		// work is in progress.
 		const picojson::object response = dispatch_daemon_request(
 			item->request, timeouts, runtime.motor_timeout_ms);
 
@@ -1087,8 +881,6 @@ void stop_daemon_runtime(DaemonRuntime &runtime)
 {
 	{
 		std::lock_guard<std::mutex> lock(runtime.mutex);
-		// Wakes both the dispatcher and any socket handler waiting for a
-		// response so daemon shutdown cannot leave threads blocked forever.
 		runtime.stopping = true;
 		while (!runtime.queue.empty()) {
 			std::shared_ptr<DaemonWorkItem> item =
@@ -1136,185 +928,8 @@ picojson::object queue_daemon_request_and_wait(DaemonRuntime &runtime,
 	return item->response;
 }
 
-int emit_daemon_response(const OutputContext &output,
-			 const std::string &command,
-			 const picojson::object &response)
-{
-	// The public CLI keeps its normal output contract even though motors are
-	// daemon-backed: JSON mode forwards the daemon object, while default mode
-	// adapts it back to raw values or "ok".
-	const auto ok_field = response.find("ok");
-	if (ok_field == response.end() || !ok_field->second.is<bool>()) {
-		return emit_error(output, "daemon_protocol_error",
-				  "daemon response is missing ok");
-	}
-
-	const bool ok = ok_field->second.get<bool>();
-	if (!ok) {
-		const auto error_field = response.find("error");
-		if (error_field == response.end() ||
-		    !error_field->second.is<picojson::object>()) {
-			return emit_error(output, "daemon_protocol_error",
-					  "daemon error response is malformed");
-		}
-
-		const picojson::object &error =
-			error_field->second.get<picojson::object>();
-		const auto code_field = error.find("code");
-		const auto message_field = error.find("message");
-		if (code_field == error.end() || message_field == error.end() ||
-		    !code_field->second.is<std::string>() ||
-		    !message_field->second.is<std::string>()) {
-			return emit_error(output, "daemon_protocol_error",
-					  "daemon error response is malformed");
-		}
-
-		return emit_error(output, code_field->second.get<std::string>(),
-				  message_field->second.get<std::string>());
-	}
-
-	const auto result_field = response.find("result");
-	if (result_field == response.end() ||
-	    !result_field->second.is<picojson::object>()) {
-		return emit_error(output, "daemon_protocol_error",
-				  "daemon success response is missing result");
-	}
-
-	if (output.json) {
-		write_json(response);
-		return 0;
-	}
-
-	const picojson::object &result =
-		result_field->second.get<picojson::object>();
-
-	if (result.find("value") != result.end()) {
-		int value = 0;
-		if (!read_result_int(result, "value", value)) {
-			return emit_error(output, "daemon_protocol_error",
-					  "daemon response value is malformed");
-		}
-
-		std::cout << value << '\n';
-		return 0;
-	}
-
-	const auto values_field = result.find("values");
-	if (values_field != result.end()) {
-		if (!values_field->second.is<picojson::array>()) {
-			return emit_error(
-				output, "daemon_protocol_error",
-				"daemon response values are malformed");
-		}
-
-		const picojson::array &values =
-			values_field->second.get<picojson::array>();
-		for (std::size_t i = 0; i < values.size(); ++i) {
-			int value = 0;
-			if (!json_int_value(values[i], value)) {
-				return emit_error(
-					output, "daemon_protocol_error",
-					"daemon response values are malformed");
-			}
-			if (i != 0) {
-				std::cout << " ";
-			}
-			std::cout << value;
-		}
-		std::cout << '\n';
-		return 0;
-	}
-
-	if (result.find("x") != result.end() ||
-	    result.find("y") != result.end() ||
-	    result.find("z") != result.end()) {
-		int x = 0;
-		int y = 0;
-		int z = 0;
-		if (!read_result_int(result, "x", x) ||
-		    !read_result_int(result, "y", y) ||
-		    !read_result_int(result, "z", z)) {
-			return emit_error(output, "daemon_protocol_error",
-					  "daemon response axes are malformed");
-		}
-
-		std::cout << x << " " << y << " " << z << '\n';
-		return 0;
-	}
-
-	std::cout << "ok\n";
-	return 0;
-}
-
-int run_daemon_command(const OutputContext &output,
-		       const std::string &socket_path,
-		       const std::string &command,
-		       const picojson::object &params)
-{
-	// Daemon-backed subcommands validate and shape the request in
-	// main(), send exactly one protocol message here, then translate the daemon
-	// response back to the user's selected output mode.
-
-	const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (fd < 0) {
-		return emit_error(output, "daemon_unavailable",
-				  "could not create daemon socket");
-	}
-
-	sockaddr_un address;
-	std::memset(&address, 0, sizeof(address));
-	address.sun_family = AF_UNIX;
-	std::strncpy(address.sun_path, socket_path.c_str(),
-		     sizeof(address.sun_path) - 1);
-
-	if (connect(fd, reinterpret_cast<sockaddr *>(&address),
-		    sizeof(address)) != 0) {
-		close(fd);
-		return emit_error(output, "daemon_unavailable",
-				  "botcli daemon is not available");
-	}
-
-	picojson::object request;
-	if (!output.id.empty()) {
-		request["id"] = picojson::value(output.id);
-	}
-	request["command"] = picojson::value(command);
-	request["params"] = picojson::value(params);
-
-	if (!write_all(fd, make_json_line(request))) {
-		close(fd);
-		return emit_error(output, "daemon_protocol_error",
-				  "could not send daemon request");
-	}
-
-	std::string response_line;
-	std::string transport_code;
-	if (!read_daemon_response_line(fd, response_line, transport_code)) {
-		close(fd);
-		if (transport_code == "daemon_timeout") {
-			return emit_error(
-				output, "daemon_timeout",
-				"timed out waiting for daemon response");
-		}
-		return emit_error(output, "daemon_protocol_error",
-				  "could not read daemon response");
-	}
-
-	close(fd);
-
-	picojson::object response;
-	if (!parse_daemon_response_line(response_line, response)) {
-		return emit_error(output, "daemon_protocol_error",
-				  "daemon response is not valid JSON");
-	}
-
-	return emit_daemon_response(output, command, response);
-}
-
 bool daemon_socket_has_listener(const std::string &socket_path)
 {
-	// A leftover pathname is common after an unclean exit. Only refuse startup
-	// when another process is actually accepting connections there.
 	if (access(socket_path.c_str(), F_OK) != 0) {
 		return false;
 	}
@@ -1339,9 +954,6 @@ bool daemon_socket_has_listener(const std::string &socket_path)
 
 void handle_daemon_client(int client_fd, DaemonRuntime &runtime)
 {
-	// Keep the wire format simple and bounded: read one newline-delimited JSON
-	// object, answer one newline-delimited JSON object, and reject oversized
-	// lines before they can consume unbounded memory.
 	std::string line;
 	char ch = '\0';
 	MotorClock::time_point read_deadline =
@@ -1473,9 +1085,6 @@ int run_daemon(const std::string &socket_path, int motor_timeout_ms)
 
 	DaemonRuntime runtime;
 	runtime.motor_timeout_ms = motor_timeout_ms;
-	// All daemon-backed hardware calls flow through this single thread. The accept
-	// loop only owns sockets and lifecycle, which prevents accidental hardware
-	// access from client handling or signal/shutdown code.
 	sigset_t daemon_signal_set;
 	sigemptyset(&daemon_signal_set);
 	sigaddset(&daemon_signal_set, SIGINT);
@@ -1509,328 +1118,112 @@ int run_daemon(const std::string &socket_path, int motor_timeout_ms)
 	return 0;
 }
 
+std::string default_socket_path()
+{
+	if (const char *env_runtime_dir = std::getenv("XDG_RUNTIME_DIR")) {
+		return std::string(env_runtime_dir) + "/botcli.sock";
+	}
+	return "/tmp/botcli.sock";
+}
+
+void print_usage(std::ostream &out)
+{
+	out << "Usage: botcli [--socket <path>] [--motor-timeout-ms <ms>]\n";
+}
+
+bool parse_positive_int(const std::string &input, int &value)
+{
+	if (input.empty()) {
+		return false;
+	}
+
+	long long parsed = 0;
+	for (const char ch : input) {
+		if (ch < '0' || ch > '9') {
+			return false;
+		}
+		parsed = parsed * 10 + (ch - '0');
+		if (parsed > std::numeric_limits<int>::max()) {
+			return false;
+		}
+	}
+
+	if (parsed <= 0) {
+		return false;
+	}
+
+	value = static_cast<int>(parsed);
+	return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
 {
-	const RawGlobalOptions raw_options =
-		inspect_raw_global_options(argc, argv);
-
-	CLI::App app{ "botcli" };
-	app.require_subcommand(1);
-
-	// Global options
-	OutputContext output;
-	CLI::Option *json_option = app.add_flag(
-		"--json", output.json, "Write one JSON object per response");
-	CLI::Option *id_option =
-		app.add_option("--id", output.id,
-			       "Request ID for JSON responses")
-			->needs(json_option)
-			->check(id_validator("Valid ID", "ID"));
-
-	std::string socket_path = "/tmp/botcli.sock";
-	if (const char *env_runtime_dir = std::getenv("XDG_RUNTIME_DIR")) {
-		socket_path = std::string(env_runtime_dir) + "/botcli.sock";
-	}
-	constexpr auto SOCK_LEN = sizeof(sockaddr_un::sun_path) - 1;
-	app.add_option("--socket", socket_path, "Daemon socket path")
-		->capture_default_str()
-		->check(CLI::Validator(
-			[](std::string &input) {
-				if (input.size() >= SOCK_LEN) {
-					return "Socket address too long. Must be less than " +
-					       std::to_string(SOCK_LEN);
-				}
-				return std::string();
-			},
-			"Socket length", "SOCK_LEN"));
-
-	// -------- daemon subcommand --------
+	std::string socket_path = default_socket_path();
 	int motor_timeout_ms = 0;
-	auto *daemon = app.add_subcommand("daemon", "Run the botcli daemon");
-	daemon->add_option(
-		      "--motor-timeout-ms", motor_timeout_ms,
-		      "Stop a motor after this many milliseconds without a refresh")
-		->check(range_validator("motor timeout", 1,
-					std::numeric_limits<int>::max(), "1+",
-					"MOTOR_TIMEOUT"));
 
-	// -------- accel subcommand --------
-	std::string accel_axis;
-	auto *accel = app.add_subcommand("accel", "Read the accelerometer");
-	accel->add_option("axis", accel_axis, "Axis to read: x, y, or z")
-		->expected(0, 1)
-		->check(axis_validator("Axis in [xyz]", "AXIS"));
+	for (int i = 1; i < argc; ++i) {
+		const std::string arg = argv[i];
 
-	// -------- gyro subcommand --------
-	std::string gyro_axis;
-	auto *gyro = app.add_subcommand("gyro", "Read the gyroscope");
-	gyro->add_option("axis", gyro_axis, "Axis to read: x, y, or z")
-		->expected(0, 1)
-		->check(axis_validator("Axis in [xyz]", "AXIS"));
-
-	// -------- magneto subcommand --------
-	std::string magneto_axis;
-	auto *magneto = app.add_subcommand("magneto", "Read the magnetometer");
-	magneto->add_option("axis", magneto_axis, "Axis to read: x, y, or z")
-		->expected(0, 1)
-		->check(axis_validator("Axis in [xyz]", "AXIS"));
-
-	// -------- side_btn subcommand --------
-	auto *side_btn = app.add_subcommand("side_btn", "Read the side button");
-
-	// -------- analog subcommand --------
-	int analog_port = -1;
-	auto *analog_cmd =
-		app.add_subcommand("analog", "Read analog sensor ports");
-	CLI::Option *analog_port_option =
-		analog_cmd
-			->add_option("port", analog_port,
-				     "Analog port to read: 0-5")
-			->expected(0, 1)
-			->check(range_validator("analog port", 0, 5, "0-5",
-						"ANALOG_PORT"));
-
-	// -------- digital subcommand --------
-	int digital_port = -1;
-	auto *digital_cmd =
-		app.add_subcommand("digital", "Read digital sensor ports");
-	CLI::Option *digital_port_option =
-		digital_cmd
-			->add_option("port", digital_port,
-				     "Digital port to read: 0-9")
-			->expected(0, 1)
-			->check(range_validator("digital port", 0, 9, "0-9",
-						"DIGITAL_PORT"));
-
-	// -------- Motor subcommand --------
-	auto *motor = app.add_subcommand("motor", "Read and write motor ports");
-	motor->require_subcommand(1);
-
-	int motor_set_port = -1;
-	int motor_set_velocity = 0;
-	auto *motor_set = motor->add_subcommand("set", "Set motor velocity");
-	motor_set
-		->add_option("port", motor_set_port, "Motor port to write: 0-3")
-		->required()
-		->check(motor_port_validator());
-	motor_set
-		->add_option("velocity", motor_set_velocity,
-			     "Motor velocity: -1500-1500")
-		->required()
-		->check(range_validator("motor velocity", -1500, 1500,
-					"-1500-1500", "MOTOR_VELOCITY"));
-
-	int motor_off_port = -1;
-	auto *motor_off =
-		motor->add_subcommand("off", "Stop one motor or all motors");
-	CLI::Option *motor_off_port_option =
-		motor_off
-			->add_option("port", motor_off_port,
-				     "Motor port to stop: 0-3")
-			->expected(0, 1)
-			->check(motor_port_validator());
-
-	int motor_get_port = -1;
-	auto *motor_get =
-		motor->add_subcommand("get", "Read motor position counter");
-	CLI::Option *motor_get_port_option =
-		motor_get
-			->add_option("port", motor_get_port,
-				     "Motor port to read: 0-3")
-			->expected(0, 1)
-			->check(motor_port_validator());
-
-	int motor_clear_port = -1;
-	auto *motor_clear =
-		motor->add_subcommand("clear", "Clear motor position counter");
-	motor_clear
-		->add_option("port", motor_clear_port,
-			     "Motor port to clear: 0-3")
-		->required()
-		->check(motor_port_validator());
-
-	// -------- Servo subcommand --------
-	auto *servo = app.add_subcommand("servo", "Read and write servo ports");
-	servo->require_subcommand(1);
-
-	int servo_get_enabled_port = -1;
-	auto *servo_get_enabled =
-		servo->add_subcommand("get_enabled", "Read servo enable state");
-	CLI::Option *servo_get_enabled_port_option =
-		servo_get_enabled
-			->add_option("port", servo_get_enabled_port,
-				     "Servo port to read: 0-3")
-			->expected(0, 1)
-			->check(servo_port_validator());
-
-	int servo_get_position_port = -1;
-	auto *servo_get = servo->add_subcommand("get", "Read servo position");
-	CLI::Option *servo_get_position_port_option =
-		servo_get
-			->add_option("port", servo_get_position_port,
-				     "Servo port to read: 0-3")
-			->expected(0, 1)
-			->check(servo_port_validator());
-
-	int servo_set_enabled_port = -1;
-	int servo_set_enabled_value = -1;
-	auto *servo_set_enabled =
-		servo->add_subcommand("set_enabled", "Set servo enable state");
-	servo_set_enabled
-		->add_option("port", servo_set_enabled_port,
-			     "Servo port to write: 0-3")
-		->required()
-		->check(servo_port_validator());
-	servo_set_enabled
-		->add_option("enabled", servo_set_enabled_value,
-			     "Servo enabled value: 0 or 1")
-		->required()
-		->check(range_validator("servo enabled value", 0, 1, "0|1",
-					"SERVO_ENABLED"));
-
-	int servo_set_position_port = -1;
-	int servo_set_position_value = -1;
-	auto *servo_set = servo->add_subcommand("set", "Set servo position");
-	servo_set
-		->add_option("port", servo_set_position_port,
-			     "Servo port to write: 0-3")
-		->required()
-		->check(servo_port_validator());
-	servo_set
-		->add_option("position", servo_set_position_value,
-			     "Servo position: 0-2047")
-		->required()
-		->check(range_validator("servo position", 0, 2047, "0-2047",
-					"SERVO_POSITION"));
-
-	// Parse and run
-	try {
-		CLI11_PARSE(app, argc, argv);
-	} catch (const CLI::ParseError &err) {
-		return app.exit(err);
-	}
-
-	if (daemon->parsed()) {
-		return run_daemon(socket_path, motor_timeout_ms);
-	}
-
-	if (side_btn->parsed()) {
-		picojson::object params;
-		return run_daemon_command(output, socket_path, "side_btn",
-					  params);
-	}
-
-	if (analog_cmd->parsed()) {
-		picojson::object params;
-		if (analog_port_option->count() > 0) {
-			params["port"] = json_int(analog_port);
+		if (arg == "--help" || arg == "-h") {
+			print_usage(std::cout);
+			return 0;
 		}
-		return run_daemon_command(output, socket_path, "analog",
-					  params);
-	}
 
-	if (digital_cmd->parsed()) {
-		picojson::object params;
-		if (digital_port_option->count() > 0) {
-			params["port"] = json_int(digital_port);
+		if (arg == "--socket") {
+			if (i + 1 >= argc) {
+				std::cerr << "error: --socket requires a path\n";
+				return 1;
+			}
+			socket_path = argv[++i];
+			continue;
 		}
-		return run_daemon_command(output, socket_path, "digital",
-					  params);
-	}
 
-	if (motor_set->parsed()) {
-		picojson::object params;
-		params["port"] = json_int(motor_set_port);
-		params["velocity"] = json_int(motor_set_velocity);
-		return run_daemon_command(output, socket_path, "motor.set",
-					  params);
-	}
-
-	if (motor_off->parsed()) {
-		picojson::object params;
-		if (motor_off_port_option->count() > 0) {
-			params["port"] = json_int(motor_off_port);
+		constexpr const char *socket_prefix = "--socket=";
+		if (arg.compare(0, 9, socket_prefix) == 0) {
+			socket_path = arg.substr(9);
+			if (socket_path.empty()) {
+				std::cerr << "error: --socket requires a path\n";
+				return 1;
+			}
+			continue;
 		}
-		return run_daemon_command(output, socket_path, "motor.off",
-					  params);
-	}
 
-	if (motor_get->parsed()) {
-		picojson::object params;
-		if (motor_get_port_option->count() > 0) {
-			params["port"] = json_int(motor_get_port);
+		if (arg == "--motor-timeout-ms") {
+			if (i + 1 >= argc) {
+				std::cerr
+					<< "error: --motor-timeout-ms requires a value\n";
+				return 1;
+			}
+			if (!parse_positive_int(argv[++i], motor_timeout_ms)) {
+				std::cerr << "error: motor timeout must be a "
+					     "positive integer\n";
+				return 1;
+			}
+			continue;
 		}
-		return run_daemon_command(output, socket_path, "motor.get",
-					  params);
-	}
 
-	if (motor_clear->parsed()) {
-		picojson::object params;
-		params["port"] = json_int(motor_clear_port);
-		return run_daemon_command(output, socket_path, "motor.clear",
-					  params);
-	}
-
-	if (servo_get_enabled->parsed()) {
-		picojson::object params;
-		if (servo_get_enabled_port_option->count() > 0) {
-			params["port"] = json_int(servo_get_enabled_port);
+		constexpr const char *timeout_prefix = "--motor-timeout-ms=";
+		if (arg.compare(0, 20, timeout_prefix) == 0) {
+			if (!parse_positive_int(arg.substr(20),
+						motor_timeout_ms)) {
+				std::cerr << "error: motor timeout must be a "
+					     "positive integer\n";
+				return 1;
+			}
+			continue;
 		}
-		return run_daemon_command(output, socket_path,
-					  "servo.get_enabled", params);
+
+		std::cerr << "error: unknown argument: " << arg << '\n';
+		return 1;
 	}
 
-	if (servo_get->parsed()) {
-		picojson::object params;
-		if (servo_get_position_port_option->count() > 0) {
-			params["port"] = json_int(servo_get_position_port);
-		}
-		return run_daemon_command(output, socket_path, "servo.get",
-					  params);
+	constexpr auto SOCK_LEN = sizeof(sockaddr_un::sun_path) - 1;
+	if (socket_path.size() >= SOCK_LEN) {
+		std::cerr << "error: socket path is too long\n";
+		return 1;
 	}
 
-	if (servo_set_enabled->parsed()) {
-		picojson::object params;
-		params["port"] = json_int(servo_set_enabled_port);
-		params["enabled"] = json_int(servo_set_enabled_value);
-		return run_daemon_command(output, socket_path,
-					  "servo.set_enabled", params);
-	}
-
-	if (servo_set->parsed()) {
-		picojson::object params;
-		params["port"] = json_int(servo_set_position_port);
-		params["position"] = json_int(servo_set_position_value);
-		return run_daemon_command(output, socket_path, "servo.set",
-					  params);
-	}
-
-	if (accel->parsed()) {
-		picojson::object params;
-		if (!accel_axis.empty()) {
-			params["axis"] = picojson::value(accel_axis);
-		}
-		return run_daemon_command(output, socket_path, "accel", params);
-	}
-
-	if (gyro->parsed()) {
-		picojson::object params;
-		if (!gyro_axis.empty()) {
-			params["axis"] = picojson::value(gyro_axis);
-		}
-		return run_daemon_command(output, socket_path, "gyro", params);
-	}
-
-	if (magneto->parsed()) {
-		picojson::object params;
-		if (!magneto_axis.empty()) {
-			params["axis"] = picojson::value(magneto_axis);
-		}
-		return run_daemon_command(output, socket_path, "magneto",
-					  params);
-	}
-
-	return emit_error(output, "unknown_command", "unknown command");
+	return run_daemon(socket_path, motor_timeout_ms);
 }
